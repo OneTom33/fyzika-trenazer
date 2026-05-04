@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>LF2 Trenér - Firebase Backup</title>
+  <style>
+    *{box-sizing:border-box}
+    body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f3f6fb;color:#0f172a;margin:0;padding:20px}
+    .card{max-width:860px;margin:20px auto;background:white;border:1px solid #d5dfed;border-radius:22px;padding:22px;box-shadow:0 12px 40px rgba(15,23,42,.10)}
+    h1{margin:0 0 8px}
+    p{color:#64748b;line-height:1.45}
+    input,button,textarea{font:inherit;border:1px solid #d5dfed;border-radius:14px;padding:12px 14px;min-height:46px}
+    input{width:100%;margin:6px 0}
+    textarea{width:100%;height:220px;font-family:ui-monospace,Consolas,monospace}
+    button{cursor:pointer;font-weight:750;margin:6px 6px 6px 0}
+    .primary{background:#2563eb;color:white;border-color:#60a5fa}
+    .danger{background:#dc2626;color:white;border-color:#fca5a5}
+    .good{background:#22c55e;color:#052e16;border-color:#86efac}
+    .warn{background:#fff7ed;border:1px solid #fdba74;border-radius:14px;padding:12px;color:#7c2d12}
+    .ok{background:#f0fdf4;border:1px solid #86efac;border-radius:14px;padding:12px;color:#052e16}
+    pre{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;border-radius:14px;padding:14px;max-height:360px;overflow:auto}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>LF2 Trenér - bezpečný Firebase backup</h1>
+    <p>
+      Tenhle nástroj slouží hlavně k tomu, abys <b>neztratil svoje data</b>.
+      Nejdřív udělej export, až potom cokoliv opravuj.
+    </p>
+
+    <div class="warn">
+      Nedávej „Přepsat cloud importem“, dokud nemáš export stažený jako JSON soubor.
+    </div>
+
+    <h2>1) Přihlášení</h2>
+    <input id="email" placeholder="E-mail">
+    <input id="password" placeholder="Heslo" type="password">
+    <button onclick="login()" class="primary">Přihlásit</button>
+    <button onclick="logout()">Odhlásit</button>
+
+    <h2>2) Načíst a zálohovat cloud state</h2>
+    <button onclick="readState()" class="primary">Načíst cloud state</button>
+    <button onclick="downloadBackup()" class="good">Stáhnout zálohu JSON</button>
+    <button onclick="copyBackup()">Zkopírovat JSON do schránky</button>
+
+    <div class="ok">
+      Po stažení JSON máš zálohu svého progressu. Teprve pak je bezpečné zkusit normalizaci.
+    </div>
+
+    <h2>3) Bezpečná oprava bez mazání dat</h2>
+    <button onclick="normalizeAndSave()" class="good">Normalizovat cloud state a uložit</button>
+    <p>
+      Normalizace zachová data, ale opraví typy: <code>known</code>, <code>flagged</code>, <code>notes</code>, <code>qStats</code>, <code>testHistory</code>.
+      Nesmaže otázky ani účet.
+    </p>
+
+    <h2>4) Obnova ze zálohy</h2>
+    <input id="backupFile" type="file" accept="application/json">
+    <button onclick="loadBackupFile()">Načíst JSON ze souboru</button>
+    <button onclick="restoreFromTextarea()" class="danger">Přepsat cloud importem</button>
+    <textarea id="jsonBox" placeholder="Tady se zobrazí / vloží JSON backup..."></textarea>
+
+    <h2>Výstup</h2>
+    <pre id="out">Čekám...</pre>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
+    import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
+    import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBeLE1tXzzzm6_v-J5FzyCEphIXeAf1fr8",
+      authDomain: "fyzika-750fa.firebaseapp.com",
+      projectId: "fyzika-750fa",
+      storageBucket: "fyzika-750fa.firebasestorage.app",
+      messagingSenderId: "811983492532",
+      appId: "1:811983492532:web:7a83c710b05d5083e64ee1",
+      measurementId: "G-RVZ2CK2EGW"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    let currentState = null;
+    const out = document.getElementById("out");
+    const jsonBox = document.getElementById("jsonBox");
+
+    function log(msg, obj) {
+      out.textContent = msg + (obj !== undefined ? "\n\n" + JSON.stringify(obj, null, 2).slice(0, 15000) : "");
+    }
+
+    function refForUser() {
+      const u = auth.currentUser;
+      if (!u) throw new Error("Nejsi přihlášený.");
+      return doc(db, "users", u.uid, "state", "main");
+    }
+
+    function normalizeState(data) {
+      const cleanNotes = {};
+      if (data?.notes && typeof data.notes === "object" && !Array.isArray(data.notes)) {
+        for (const [k, v] of Object.entries(data.notes)) {
+          if (typeof v === "string" && v.trim()) cleanNotes[String(k)] = v;
+        }
+      }
+
+      const cleanStats = {};
+      if (data?.qStats && typeof data.qStats === "object" && !Array.isArray(data.qStats)) {
+        for (const [k, v] of Object.entries(data.qStats)) {
+          if (v && typeof v === "object" && !Array.isArray(v)) cleanStats[String(k)] = v;
+        }
+      }
+
+      return {
+        known: Array.isArray(data?.known) ? [...new Set(data.known.map(String))] : [],
+        flagged: Array.isArray(data?.flagged) ? [...new Set(data.flagged.map(String))] : [],
+        notes: cleanNotes,
+        qStats: cleanStats,
+        testHistory: Array.isArray(data?.testHistory) ? data.testHistory.slice(0, 50) : [],
+        updatedAt: serverTimestamp()
+      };
+    }
+
+    function plainStateForBackup(data) {
+      return {
+        exportedAt: new Date().toISOString(),
+        uid: auth.currentUser?.uid || null,
+        app: "LF2 Trenér",
+        state: {
+          known: Array.isArray(data?.known) ? data.known : [],
+          flagged: Array.isArray(data?.flagged) ? data.flagged : [],
+          notes: data?.notes && typeof data.notes === "object" ? data.notes : {},
+          qStats: data?.qStats && typeof data.qStats === "object" ? data.qStats : {},
+          testHistory: Array.isArray(data?.testHistory) ? data.testHistory : []
+        }
+      };
+    }
+
+    window.login = async function() {
+      try {
+        const email = document.getElementById("email").value.trim();
+        const pass = document.getElementById("password").value;
+        await signInWithEmailAndPassword(auth, email, pass);
+        log("Přihlášeno jako " + auth.currentUser.email + "\nUID: " + auth.currentUser.uid);
+      } catch(e) {
+        log("Chyba přihlášení", { message: e.message, code: e.code, stack: e.stack });
+      }
+    };
+
+    window.logout = async function() {
+      await signOut(auth);
+      currentState = null;
+      jsonBox.value = "";
+      log("Odhlášeno.");
+    };
+
+    window.readState = async function() {
+      try {
+        const snap = await getDoc(refForUser());
+        currentState = snap.exists() ? snap.data() : {};
+        const backup = plainStateForBackup(currentState);
+        jsonBox.value = JSON.stringify(backup, null, 2);
+        log("Cloud state načten.", {
+          known: backup.state.known.length,
+          flagged: backup.state.flagged.length,
+          notes: Object.keys(backup.state.notes).length,
+          qStats: Object.keys(backup.state.qStats).length,
+          testHistory: backup.state.testHistory.length
+        });
+      } catch(e) {
+        log("Chyba čtení cloud state", { message: e.message, code: e.code, stack: e.stack });
+      }
+    };
+
+    window.downloadBackup = function() {
+      try {
+        if (!currentState) throw new Error("Nejdřív klikni Načíst cloud state.");
+        const backup = plainStateForBackup(currentState);
+        const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        const date = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+        a.href = URL.createObjectURL(blob);
+        a.download = "lf2-trener-backup-" + date + ".json";
+        a.click();
+        URL.revokeObjectURL(a.href);
+        log("Záloha stažena jako JSON.");
+      } catch(e) {
+        log("Chyba exportu", { message: e.message, stack: e.stack });
+      }
+    };
+
+    window.copyBackup = async function() {
+      try {
+        if (!jsonBox.value.trim()) throw new Error("Nejdřív načti cloud state.");
+        await navigator.clipboard.writeText(jsonBox.value);
+        log("JSON zkopírován do schránky.");
+      } catch(e) {
+        log("Chyba kopírování", { message: e.message, stack: e.stack });
+      }
+    };
+
+    window.normalizeAndSave = async function() {
+      try {
+        if (!currentState) await window.readState();
+        if (!confirm("Máš staženou zálohu JSON? Pokud ne, nejdřív klikni Stáhnout zálohu JSON.")) return;
+        const normalized = normalizeState(currentState || {});
+        await setDoc(refForUser(), normalized, { merge: false });
+        currentState = normalized;
+        jsonBox.value = JSON.stringify(plainStateForBackup(normalized), null, 2);
+        log("Cloud state normalizován a uložen.", {
+          known: normalized.known.length,
+          flagged: normalized.flagged.length,
+          notes: Object.keys(normalized.notes).length,
+          qStats: Object.keys(normalized.qStats).length,
+          testHistory: normalized.testHistory.length
+        });
+      } catch(e) {
+        log("Chyba normalizace", { message: e.message, code: e.code, stack: e.stack });
+      }
+    };
+
+    window.loadBackupFile = async function() {
+      try {
+        const file = document.getElementById("backupFile").files[0];
+        if (!file) throw new Error("Vyber JSON soubor.");
+        const text = await file.text();
+        JSON.parse(text);
+        jsonBox.value = text;
+        log("JSON soubor načten do pole. Ještě není uložen do cloudu.");
+      } catch(e) {
+        log("Chyba načtení souboru", { message: e.message, stack: e.stack });
+      }
+    };
+
+    window.restoreFromTextarea = async function() {
+      try {
+        if (!confirm("Fakt přepsat cloud state tímhle JSONem?")) return;
+        const parsed = JSON.parse(jsonBox.value);
+        const state = parsed.state || parsed;
+        const normalized = normalizeState(state);
+        await setDoc(refForUser(), normalized, { merge: false });
+        currentState = normalized;
+        log("Cloud state obnoven ze zálohy.", {
+          known: normalized.known.length,
+          flagged: normalized.flagged.length,
+          notes: Object.keys(normalized.notes).length,
+          qStats: Object.keys(normalized.qStats).length,
+          testHistory: normalized.testHistory.length
+        });
+      } catch(e) {
+        log("Chyba importu", { message: e.message, code: e.code, stack: e.stack });
+      }
+    };
+
+    onAuthStateChanged(auth, user => {
+      if (user) log("Přihlášeno jako " + user.email + "\nUID: " + user.uid);
+    });
+  </script>
+</body>
+</html>
